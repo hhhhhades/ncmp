@@ -2,7 +2,7 @@ name: Auto Score
 
 on:
   schedule:
-    - cron: '23 17 * * *'  # 每天北京时间凌晨1:23执行
+    - cron: '1 17 * * *'   # 每天北京时间01:01启动，随后随机等待至01:00-03:00内执行
   workflow_dispatch:
 
 jobs:
@@ -34,4 +34,22 @@ jobs:
         WAIT_TIME_MAX: ${{ secrets.WAIT_TIME_MAX }}
         SCORE: ${{ secrets.SCORE }}
         FULL_EXTRA_TASKS: ${{ secrets.FULL_EXTRA_TASKS }}
-      run: python main.py 
+      run: |
+        # 手动运行立即执行；仅定时任务在北京时间01:00-03:00随机等待
+        if [[ "${{ github.event_name }}" == "schedule" ]]; then
+          today=$(TZ=Asia/Shanghai date +%F)
+          window_start=$(TZ=Asia/Shanghai date -d "$today 01:00:00" +%s)
+          window_end=$(TZ=Asia/Shanghai date -d "$today 03:00:00" +%s)
+          now=$(date +%s)
+          if (( now >= window_end )); then
+            echo "已超过北京时间03:00，跳过本次定时评分，避免在指定时间段外执行。"
+            exit 0
+          fi
+          min_delay=$((window_start > now ? window_start - now : 0))
+          max_delay=$((window_end - now - 1))
+          delay=$(shuf -i "$min_delay-$max_delay" -n 1)
+          target_time=$(TZ=Asia/Shanghai date -d "@$((now + delay))" '+%F %T')
+          echo "将在北京时间 $target_time 执行评分，随机等待 $delay 秒。"
+          sleep "$delay"
+        fi
+        python main.py
