@@ -56,6 +56,17 @@ class Config:
         if gh_repo := os.getenv("GH_REPO"):
             config["gh_repo"] = gh_repo
             
+        # 邮件通知的扩展配置；未设置时继续兼容原有 SMTP Secrets
+        notification_vars = {
+            "SMTP_USERNAME": "smtp_username",
+            "SMTP_FROM_EMAIL": "smtp_from_email",
+            "BREVO_API_KEY": "brevo_api_key",
+            "BREVO_SENDER_EMAIL": "brevo_sender_email",
+        }
+        for env_name, config_name in notification_vars.items():
+            if value := os.getenv(env_name):
+                config[config_name] = value
+
         config.setdefault("wait_time_min", 15)
         config.setdefault("wait_time_max", 20)
         config.setdefault("score", 3)  # 默认使用3-4分策略
