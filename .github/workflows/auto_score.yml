@@ -51,6 +51,10 @@ jobs:
         EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
         SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
         SMTP_PORT: ${{ secrets.SMTP_PORT }}
+        SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+        SMTP_FROM_EMAIL: ${{ secrets.SMTP_FROM_EMAIL }}
+        BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
+        BREVO_SENDER_EMAIL: ${{ secrets.BREVO_SENDER_EMAIL }}
         WAIT_TIME_MIN: ${{ secrets.WAIT_TIME_MIN }}
         WAIT_TIME_MAX: ${{ secrets.WAIT_TIME_MAX }}
         SCORE: ${{ secrets.SCORE }}
