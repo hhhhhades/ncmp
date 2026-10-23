@@ -1,0 +1,24 @@
+name: Test Email Notification
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-mail:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Send one test email
+        env:
+          NOTIFY_EMAIL: ${ secrets.NOTIFY_EMAIL }}
+          EMAIL_PASSWORD: ${ secrets.EMAIL_PASSWORD }}
+          SMTP_SERVER: ${ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${ secrets.SMTP_USERNAME }}
+          SMTP_FROM_EMAIL: ${ secrets.SMTP_FROM_EMAIL }}
+          BREVO_API_KEY: ${ secrets.BREVO_API_KEY }}
+          BREVO_SENDER_EMAIL: ${ secrets.BREVO_SENDER_EMAIL }}
+        run: python tests/test_notification.py
