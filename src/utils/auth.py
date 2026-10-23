@@ -4,7 +4,7 @@ from ..utils.logger import Logger
 
 try:
     from pyncm.apis.login import LoginViaCellphone
-    from pyncm import GetCurrentSession, DumpSessionAsString
+    from pyncm import GetCurrentSession
     PYNCM_AVAILABLE = True
 except ImportError:
     PYNCM_AVAILABLE = False
@@ -79,11 +79,8 @@ class AuthService:
             }
             
             self.logger.info("登录成功并获取Cookie")
-            self.logger.debug(f"成功获取MUSIC_U: {music_u_cookie[:10]}... 和 __csrf: {csrf_cookie}")
-            
-            # 记录会话信息（可选，用于调试）
-            session_string = DumpSessionAsString(session)
-            self.logger.debug(f"会话信息: {session_string[:50]}...")
+            # 不在日志中打印 Cookie、CSRF 或会话数据
+            self.logger.debug("已获取所需Cookie字段（内容已隐藏）")
             
             return True, cookie_dict
             
