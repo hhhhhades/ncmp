@@ -22,7 +22,28 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
     
-    - name: Run script
+    - name: Choose random start time (scheduled runs only)
+      if: github.event_name == 'schedule'
+      shell: bash
+      run: |
+        set -euo pipefail
+        today=$(TZ=Asia/Shanghai date +%F)
+        window_start=$(TZ=Asia/Shanghai date -d "$today 01:00:00" +%s)
+        window_end=$(TZ=Asia/Shanghai date -d "$today 03:00:00" +%s)
+        now=$(date +%s)
+        if (( now >= window_end )); then
+          echo "::warning::GitHub 定时启动已晚于北京时间 03:00，立即补执行评分，不再跳过任务。"
+        else
+          min_delay=$((window_start > now ? window_start - now : 0))
+          max_delay=$((window_end - now - 1))
+          delay=$(shuf -i "$min_delay-$max_delay" -n 1)
+          target_time=$(TZ=Asia/Shanghai date -d "@$((now + delay))" '+%F %T')
+          echo "计划北京时间 $target_time 开始评分，随机等待 $delay 秒。"
+          sleep "$delay"
+        fi
+
+    - name: Run scoring script
+      shell: bash
       env:
         MUSIC_U: ${{ secrets.MUSIC_U }}
         CSRF: ${{ secrets.CSRF }}
@@ -35,21 +56,11 @@ jobs:
         SCORE: ${{ secrets.SCORE }}
         FULL_EXTRA_TASKS: ${{ secrets.FULL_EXTRA_TASKS }}
       run: |
-        # 手动运行立即执行；仅定时任务在北京时间01:00-03:00随机等待
-        if [[ "${{ github.event_name }}" == "schedule" ]]; then
-          today=$(TZ=Asia/Shanghai date +%F)
-          window_start=$(TZ=Asia/Shanghai date -d "$today 01:00:00" +%s)
-          window_end=$(TZ=Asia/Shanghai date -d "$today 03:00:00" +%s)
-          now=$(date +%s)
-          if (( now >= window_end )); then
-            echo "已超过北京时间03:00，跳过本次定时评分，避免在指定时间段外执行。"
-            exit 0
-          fi
-          min_delay=$((window_start > now ? window_start - now : 0))
-          max_delay=$((window_end - now - 1))
-          delay=$(shuf -i "$min_delay-$max_delay" -n 1)
-          target_time=$(TZ=Asia/Shanghai date -d "@$((now + delay))" '+%F %T')
-          echo "将在北京时间 $target_time 执行评分，随机等待 $delay 秒。"
-          sleep "$delay"
+        set -o pipefail
+        echo "开始执行网易云音乐合伙人评分任务..."
+        python main.py 2>&1 | tee score_execution.log
+        if ! grep -Fq "✅ 执行成功" score_execution.log; then
+          echo "::error::评分脚本未报告成功，请查看本步骤的日志及 Cookie 有效性。"
+          exit 1
         fi
-        python main.py
+        echo "评分脚本执行成功（请检查日志中的实际评分数量）。"
