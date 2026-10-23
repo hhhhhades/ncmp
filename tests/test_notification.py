@@ -1,7 +1,11 @@
 import logging
 import os
 import sys
+from pathlib import Path
 from datetime import datetime, timezone
+
+# 直接运行 tests/test_notification.py 时将仓库根目录加入模块路径
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.utils.config import Config
 from src.utils.logger import Logger
