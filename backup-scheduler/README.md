@@ -1,60 +1,76 @@
-# NCMP 每日评分独立备用调度（Cloudflare Workers）
+# NCMP 独立备用调度
 
-本目录提供 **独立于 GitHub Actions `schedule` 的备用定时触发器**。GitHub 原生定时任务仍保留：每天北京时间 01:01 开始调度，并随机等待到 01:00–03:00 之间评分。
+本目录是可部署的 Cloudflare Worker。代码提交、离线测试和编译检查均不等于已上线；需要真实账户部署、设置 Secret，并核验线上运行。
 
-## 工作机制
+## 时间与原配置
 
-- **02:45（北京时间）**：Cloudflare Worker 检查当天是否已有成功评分；若没有，调用 GitHub Actions 的 `workflow_dispatch`。
-- **04:15（北京时间）**：如果当天仍没有成功评分，再尝试补执行。
-- **去重**：`.github/workflows/auto_score.yml` 使用 job concurrency 串行执行，并在评分前查询当日成功运行记录；原生定时和备用触发同时到达时，正常情况下只评分一次。
-- **手动运行**：Actions 页面默认选择 `manual`，仍允许主动重新评分，不受每日去重限制。
-- **Cookie 刷新**：每周五北京时间 20:00 的 `Refresh Cookie` 工作流保持原样，不受影响。
+| 来源 | 北京时间 | 行为 |
+| --- | --- | --- |
+| GitHub 原生 schedule | 01:01 启动 | 随机等待到 01:00–03:00 内评分；严重延迟时立即补执行 |
+| Cloudflare Cron `45 18 * * *` | 每天 02:45 | 无当天完成记录时派发备用运行 |
+| Cloudflare Cron `15 20 * * *` | 每天 04:15 | 再次检查并补偿漏执行 |
+| Refresh Cookie | 每周五 20:00 | 原工作流保持原样 |
 
-> 重要：仓库代码提交并不等于外部调度已启用。必须完成下述 Cloudflare 部署和 Token 配置。GitHub 或 Cloudflare 的故障仍可能导致延迟；这是一套降低漏执行概率的双调度方案，不是绝对准时保证。
+保留 QQ 邮箱 SMTP `smtp.qq.com:465`（及原有通知后备方式）、`SCORE`、`WAIT_TIME_MIN/MAX`、`FULL_EXTRA_TASKS` 等 Secrets。
 
-## 一、创建专用 GitHub Token
+## 完成记录与去重
 
-1. 打开 [GitHub Fine-grained Personal Access Tokens](https://github.com/settings/personal-access-tokens)。
-2. 新建一个 Token，Repository access 选择 **Only select repositories**，只选 `hhhhhades/ncmp`。
-3. Repository permissions 设置 **Actions: Read and write**（Metadata 默认只读）。
-4. 设置有效期，记住到期后需要更新 Cloudflare 中的 Token。
-5. **不要将 Token 提交到仓库、发送到聊天，或写入 `wrangler.toml`。**
+- 所有原生、备用、手动运行都使用固定 concurrency group `ncmp-daily-score`，仅 main 分支允许评分。手动运行默认也去重，没有绕过去重的选项。
+- 工作流在等待前、评分前各查一次完成记录；查询失败直接停止评分。Worker 的检查只是减少无用派发，查询失败可以派发，不能绕过工作流检查。
+- 只认可精确名 `ncmp-score-completed-v1-YYYY-MM-DD` 的未过期 artifact，核验创建北京日期、main 分支及所属 `auto_score.yml` 运行。查询支持分页。不用 workflow 的 success 或 run_started_at 推断是否评分。
+- `main.py` 只在网易云服务端确认每日和配置要求的额外任务完成后，返回 0 并生成无凭据的 JSON 回执。工作流再次校验回执后才上传完成记录。
+- 因去重或验证模式而跳过的成功 workflow 不写完成记录。有效的服务端“任务已完成”状态可以生成回执，其中 submitted=0；这与工作流跳过不同。
+- 网络超时不自动重发结果不确定的评分 POST；失败后下一次运行先读取服务端已完成状态，只处理未完成作品。405 资源跳过、部分未完成不能冒充成功。
+- 备用请求携带明确的北京日期；过期或未来请求不会评分。Cloudflare 使用 scheduledTime，延迟跨日回调直接跳过。评分脚本在提交前后检查日期，不能跨日继续提交。
+- 日内完成记录至少保留 30 天。不要手动删除当天 artifact。中途取消、完成记录上传失败、人工删除记录或外部操作都可能破坏全局去重；服务端完成状态是重试时的第二道保护。客户端无法对远端评分 API 提供事务式 exactly-once 保证。
 
-这枚 Token 仅供 Cloudflare Worker 调用 GitHub API，和 Cookie 刷新工作流的 `GH_TOKEN` 分开管理。
+## GitHub Token：仅限单仓库 Actions 权限
 
-## 二、部署 Cloudflare Worker
+在 [Fine-grained tokens](https://github.com/settings/personal-access-tokens/new) 创建专用 Token：
 
-需要 Cloudflare 账户和本机 Node.js 环境。在仓库根目录打开终端：
+1. Resource owner：`hhhhhades`。
+2. Repository access：Only select repositories，只选 `ncmp`。
+3. Repository permissions：**Actions: Read and write**；Metadata 保持默认只读，其他权限不勾选。
+4. 设置合适有效期并记下更新日期。过期前更新 Worker Secret。
 
-```bash
-cd backup-scheduler
-npx wrangler login
-npx wrangler deploy
-npx wrangler secret put GITHUB_TOKEN
+不要把 Token 发到聊天、提交代码、放入命令参数、URL、日志或普通变量配置。Cookie 刷新的现有 `GH_TOKEN` 是另一枚凭据，无需修改。Token 使用范围依据 [workflow_dispatch 权限文档](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)。
+
+## 部署
+
+在本目录打开终端，使用专用 Cloudflare 账户完成授权：
+
+```powershell
+npx --yes wrangler@4.162.0 login --use-keyring --scopes account:read user:read workers_scripts:write workers_tail:read
+npx --yes wrangler@4.162.0 deploy
+npx --yes wrangler@4.162.0 secret put GITHUB_TOKEN
+npx --yes wrangler@4.162.0 secret list
+npx --yes wrangler@4.162.0 deployments list
 ```
 
-最后一条命令会要求输入上一步创建的 GitHub Token；它作为 **Cloudflare Worker Secret** 保存，不会写进仓库。
+仅在 `secret put` 的交互提示中输入 Token，或在 Cloudflare 控制台选择 **Secret / Encrypt**，名称设为 `GITHUB_TOKEN`。不要使用 `--var GITHUB_TOKEN=...`。Secret 不可从控制台重新读取；核验只查看名称及类型。部署前若同名 Worker 已存在，先核对账户、当前代码和版本，避免覆盖无关服务。
 
-如果不方便使用命令行，也可以在 Cloudflare 控制台创建 Worker，使用本目录 `worker.js` 作为脚本，并将 `GITHUB_TOKEN` 配置为 Secret，设置以下 Cron Triggers：
+`wrangler.toml` 已包含两个 UTC Cron 和 observability。Cloudflare 控制台中核对 `ncmp-score-backup` 的线上版本、上述两个 Cron、Secret 名称及日志状态。Cron 使用 UTC，配置传播最多可能需要 15 分钟，依据 [Cloudflare 文档](https://developers.cloudflare.com/workers/configuration/cron-triggers/)。由 Wrangler 管理时，后续修改 Cron 应同步此配置文件。
 
-| Cron（UTC） | 北京时间 | 作用 |
-| --- | --- | --- |
-| `45 18 * * *` | 每天 02:45 | 主备用调度 |
-| `15 20 * * *` | 每天 04:15 | 漏执行补偿 |
+## 线上验证（避免为了测试重复评分）
 
-Cloudflare 的 Cron Triggers 使用 UTC 时区，配置更新可能需要一段时间生效。
+Worker 的其他 HTTP 路由返回 404，不提供公开评分接口。`POST /verify` 需要请求头 `Authorization: Bearer` 携带同一专用 Token，拒绝查询参数中的凭据；它仅派发 `verification_only=true`，不会真实评分或生成完成记录。不要将包含认证头的请求打印或录制到日志。
 
-## 三、验证
+1. 核对 Cloudflare deployment ID、Cron 配置和 Secret 名称；检查 Worker 日志已开启。
+2. 使用受保护的 `/verify` 发起一次验证，记录响应中的 request_id。
+3. 到 [Auto Score](https://github.com/hhhhhades/ncmp/actions/workflows/auto_score.yml) 找到标题中相同 request_id 的 `workflow_dispatch`。
+4. 检查 guard 日志和 summary 显示 `verification only; would_run=...`，评分步骤和 artifact 上传步骤均跳过。这个成功运行不能计为已评分。
+5. 在下一次真实 Cron 时间，检查 Worker 日志 `already_scored` 或 `dispatched`。若派发，核对 request_id、实际评分步骤和当天完成回执；不要只看绿色工作流状态。
+6. 实际评分后，追加一次普通手动运行应由 guard 跳过，且不能额外产生完成记录。
 
-1. 打开 Cloudflare 控制台，进入 `ncmp-score-backup` Worker，确认两个 Cron Triggers 已存在，Secret `GITHUB_TOKEN` 已设置。
-2. 查看 Worker 的日志：若当天已成功评分，应出现 `scoring already succeeded`；否则应出现 `backup dispatched Auto Score`。
-3. 打开 [GitHub Actions / Auto Score](https://github.com/hhhhhades/ncmp/actions/workflows/auto_score.yml)。备用调度创建的运行类型是 `workflow_dispatch`，输入 `trigger_source=backup`。
-4. GitHub 工作流步骤 `Check whether scoring already succeeded today` 会显示当天是否跳过评分。
-5. 如日志出现 HTTP 401/403，检查 Token 是否有效及 Actions 权限；如出现 HTTP 404，检查 Token 是否有该仓库访问权限及工作流是否启用。
+结构化 Worker 日志包含 date、request_id、status。常见状态：`already_scored`、`dispatched`、`verification_dispatched`、`expired_cron`、`marker_check_failed`、`dispatch_failed`。401/403 检查 Token 有效期和 Actions 权限；404 检查单仓库授权、工作流文件和启用状态。错误日志不输出 GitHub 响应正文或 Token。
 
-## 四、运行限制
+离线验证：
 
-- GitHub 的原生 `schedule` 可能严重延迟甚至丢失；Cloudflare 调度与其独立，但触发后仍需要 GitHub Actions 有能力接收并执行任务。
-- 两次触发只在当日尚无成功评分时补偿；**不能保证**当天一定成功（例如 GitHub API 长时间不可用、Cookie 失效或评分脚本失败）。
-- 备用触发的工作流运行可能显示成功但 `Run scoring script` 被跳过，这是去重机制生效，不代表执行了第二次评分。
-- 请定期检查 Cloudflare 日志、GitHub Actions 运行记录和 Token 有效期。
+```powershell
+node --test backup-scheduler/worker.test.mjs
+python -m unittest tests.test_daily_guard tests.test_scoring_result
+```
+
+以上从仓库根目录运行。GitHub 的 `Backup Scheduler Checks` 会在相关变更提交后运行同样的无网络回归测试；该工作流不读取评分 Secrets，不执行真实评分。
+
+GitHub/Cloudflare 故障、Cookie 失效和 Token 过期仍可能导致漏执行。上线验收必须区分：代码检查通过、已部署配置、验证派发通过、真实定时评分通过。没有对应证据时，不应报告后续阶段已完成。

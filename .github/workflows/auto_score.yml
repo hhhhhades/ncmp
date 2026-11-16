@@ -1,109 +1,146 @@
 name: Auto Score
+run-name: Auto Score · ${{ inputs.trigger_source || 'schedule' }} · ${{ inputs.request_id || github.run_id }}
 
 on:
   schedule:
-    - cron: '1 17 * * *'   # 每天北京时间01:01启动，随后随机等待至01:00-03:00内执行
+    - cron: '1 17 * * *' # 北京时间 01:01 启动，随后随机等待至 01:00–03:00 内评分
   workflow_dispatch:
     inputs:
       trigger_source:
-        description: 'manual or independent backup scheduler'
-        required: false
+        description: '触发来源（所有来源均执行每日去重）'
         type: choice
         default: manual
-        options:
-          - manual
-          - backup
+        options: [manual, backup]
+      score_date:
+        description: '目标北京日期 YYYY-MM-DD；手动留空表示今天'
+        type: string
+        required: false
+      request_id:
+        description: '备用调度请求编号，用于关联 Worker 日志'
+        type: string
+        required: false
+      verification_only:
+        description: '仅核验触发和去重，不评分、不写完成记录'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+# 所有触发来源共用一把锁；延迟到达的 schedule 不能与备用/手动评分并行。
+concurrency:
+  group: ncmp-daily-score
+  cancel-in-progress: false
 
 jobs:
   score:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: read
-    concurrency:
-      group: auto-score-${{ github.ref }}
-      cancel-in-progress: false
-    
+    timeout-minutes: 240
     steps:
-    - uses: actions/checkout@v2
-    
-    - name: Set up Python
-      uses: actions/setup-python@v2
-      with:
-        python-version: '3.x'
-    
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-    
-    - name: Choose random start time (scheduled runs only)
-      if: github.event_name == 'schedule'
-      shell: bash
-      run: |
-        set -euo pipefail
-        today=$(TZ=Asia/Shanghai date +%F)
-        window_start=$(TZ=Asia/Shanghai date -d "$today 01:00:00" +%s)
-        window_end=$(TZ=Asia/Shanghai date -d "$today 03:00:00" +%s)
-        now=$(date +%s)
-        if (( now >= window_end )); then
-          echo "::warning::GitHub 定时启动已晚于北京时间 03:00，立即补执行评分，不再跳过任务。"
-        else
-          min_delay=$((window_start > now ? window_start - now : 0))
-          max_delay=$((window_end - now - 1))
-          delay=$(shuf -i "$min_delay-$max_delay" -n 1)
-          target_time=$(TZ=Asia/Shanghai date -d "@$((now + delay))" '+%F %T')
-          echo "计划北京时间 $target_time 开始评分，随机等待 $delay 秒。"
-          sleep "$delay"
-        fi
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-    - name: Check whether scoring already succeeded today
-      id: daily_guard
-      if: github.event_name == 'schedule' || inputs.trigger_source == 'backup'
-      shell: bash
-      env:
-        GH_TOKEN: ${{ github.token }}
-      run: |
-        set -euo pipefail
-        today=$(TZ=Asia/Shanghai date +%F)
-        echo "检查北京时间 $today 是否已有成功的评分任务..."
-        runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/auto_score.yml/runs?branch=main&status=success&per_page=100")
-        if jq -e --arg day "$today" '
-          any(.workflow_runs[];
-            (.run_started_at != null) and
-            ((.run_started_at | fromdateiso8601 | . + 28800 | strftime("%Y-%m-%d")) == $day)
-          )' <<< "$runs" >/dev/null; then
-          echo "should_run=false" >> "$GITHUB_OUTPUT"
-          echo "北京时间 $today 已有成功评分，跳过本次，避免重复执行。"
-        else
-          echo "should_run=true" >> "$GITHUB_OUTPUT"
-          echo "北京时间 $today 尚无成功评分，继续执行。"
-        fi
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
-    - name: Run scoring script
-      if: steps.daily_guard.outputs.should_run != 'false'
-      shell: bash
-      env:
-        MUSIC_U: ${{ secrets.MUSIC_U }}
-        CSRF: ${{ secrets.CSRF }}
-        NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
-        EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-        SMTP_SERVER: smtp.qq.com
-        SMTP_PORT: '465'
-        SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
-        SMTP_FROM_EMAIL: ${{ secrets.SMTP_FROM_EMAIL }}
-        BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
-        BREVO_SENDER_EMAIL: ${{ secrets.BREVO_SENDER_EMAIL }}
-        WAIT_TIME_MIN: ${{ secrets.WAIT_TIME_MIN }}
-        WAIT_TIME_MAX: ${{ secrets.WAIT_TIME_MAX }}
-        SCORE: ${{ secrets.SCORE }}
-        FULL_EXTRA_TASKS: ${{ secrets.FULL_EXTRA_TASKS }}
-      run: |
-        set -o pipefail
-        echo "开始执行网易云音乐合伙人评分任务..."
-        python main.py 2>&1 | tee score_execution.log
-        if ! grep -Fq "✅ 执行成功" score_execution.log; then
-          echo "::error::评分脚本未报告成功，请查看本步骤的日志及 Cookie 有效性。"
-          exit 1
-        fi
-        echo "评分脚本执行成功（请检查日志中的实际评分数量）。"
+      - name: Check verified daily completion before waiting
+        id: initial_guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRIGGER_SOURCE: ${{ inputs.trigger_source }}
+          REQUESTED_SCORE_DATE: ${{ inputs.score_date }}
+          VERIFICATION_ONLY: ${{ inputs.verification_only }}
+        run: python backup-scheduler/daily_guard.py
+
+      - name: Install dependencies
+        if: steps.initial_guard.outputs.should_run == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Choose random start time (scheduled runs only)
+        if: github.event_name == 'schedule' && steps.initial_guard.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          today=$(TZ=Asia/Shanghai date +%F)
+          window_start=$(TZ=Asia/Shanghai date -d "$today 01:00:00" +%s)
+          window_end=$(TZ=Asia/Shanghai date -d "$today 03:00:00" +%s)
+          now=$(date +%s)
+          if (( now >= window_end )); then
+            echo "::warning::GitHub 定时启动已晚于北京时间 03:00，立即补执行，不再随机等待。"
+          else
+            min_delay=$((window_start > now ? window_start - now : 0))
+            max_delay=$((window_end - now - 1))
+            delay=$(shuf -i "$min_delay-$max_delay" -n 1)
+            target_time=$(TZ=Asia/Shanghai date -d "@$((now + delay))" '+%F %T')
+            echo "计划北京时间 $target_time 开始评分，随机等待 $delay 秒。"
+            sleep "$delay"
+          fi
+
+      - name: Check verified daily completion immediately before scoring
+        id: daily_guard
+        if: steps.initial_guard.outputs.should_run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRIGGER_SOURCE: ${{ inputs.trigger_source }}
+          REQUESTED_SCORE_DATE: ${{ steps.initial_guard.outputs.score_date }}
+          VERIFICATION_ONLY: ${{ inputs.verification_only }}
+        run: python backup-scheduler/daily_guard.py
+
+      - name: Run scoring script
+        id: scoring
+        if: steps.daily_guard.outputs.should_run == 'true'
+        env:
+          NCMP_RESULT_FILE: ${{ runner.temp }}/ncmp-score-result.json
+          NCMP_SCORE_DATE: ${{ steps.daily_guard.outputs.score_date }}
+          MUSIC_U: ${{ secrets.MUSIC_U }}
+          CSRF: ${{ secrets.CSRF }}
+          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          SMTP_SERVER: smtp.qq.com
+          SMTP_PORT: '465'
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_FROM_EMAIL: ${{ secrets.SMTP_FROM_EMAIL }}
+          BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
+          BREVO_SENDER_EMAIL: ${{ secrets.BREVO_SENDER_EMAIL }}
+          WAIT_TIME_MIN: ${{ secrets.WAIT_TIME_MIN }}
+          WAIT_TIME_MAX: ${{ secrets.WAIT_TIME_MAX }}
+          SCORE: ${{ secrets.SCORE }}
+          FULL_EXTRA_TASKS: ${{ secrets.FULL_EXTRA_TASKS }}
+        run: python main.py
+
+      - name: Validate scoring completion receipt
+        if: steps.scoring.outcome == 'success' && steps.daily_guard.outputs.should_run == 'true'
+        env:
+          RESULT_FILE: ${{ runner.temp }}/ncmp-score-result.json
+          SCORE_DATE: ${{ steps.daily_guard.outputs.score_date }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from datetime import datetime, timezone, timedelta
+          from pathlib import Path
+          data = json.loads(Path(os.environ['RESULT_FILE']).read_text(encoding='utf-8'))
+          day = os.environ['SCORE_DATE']
+          beijing = timezone(timedelta(hours=8))
+          assert data['schema'] == 1 and data['status'] == 'completed', 'Invalid completion receipt'
+          assert data['score_date'] == day, 'Receipt date mismatch'
+          for field in ('started_at', 'completed_at'):
+              stamp = datetime.fromisoformat(data[field].replace('Z', '+00:00'))
+              assert stamp.tzinfo is not None and stamp.astimezone(beijing).date().isoformat() == day, 'Receipt crossed Beijing midnight'
+          print('Verified scoring completion for Beijing date ' + day)
+          PY
+
+      - name: Record verified scoring completion
+        if: success() && steps.scoring.outcome == 'success' && steps.daily_guard.outputs.should_run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ncmp-score-completed-v1-${{ steps.daily_guard.outputs.score_date }}
+          path: ${{ runner.temp }}/ncmp-score-result.json
+          if-no-files-found: error
+          retention-days: 30

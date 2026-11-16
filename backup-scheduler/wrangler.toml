@@ -1,6 +1,10 @@
 name = "ncmp-score-backup"
 main = "worker.js"
 compatibility_date = "2026-11-01"
+workers_dev = true
+
+[observability]
+enabled = true
 
 # Cloudflare Cron Triggers are UTC:
 # 18:45 UTC = 02:45 Beijing next day (within the preferred window).
