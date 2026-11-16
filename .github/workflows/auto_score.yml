@@ -4,10 +4,25 @@ on:
   schedule:
     - cron: '1 17 * * *'   # 每天北京时间01:01启动，随后随机等待至01:00-03:00内执行
   workflow_dispatch:
+    inputs:
+      trigger_source:
+        description: 'manual or independent backup scheduler'
+        required: false
+        type: choice
+        default: manual
+        options:
+          - manual
+          - backup
 
 jobs:
   score:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    concurrency:
+      group: auto-score-${{ github.ref }}
+      cancel-in-progress: false
     
     steps:
     - uses: actions/checkout@v2
@@ -42,7 +57,31 @@ jobs:
           sleep "$delay"
         fi
 
+    - name: Check whether scoring already succeeded today
+      id: daily_guard
+      if: github.event_name == 'schedule' || inputs.trigger_source == 'backup'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        today=$(TZ=Asia/Shanghai date +%F)
+        echo "检查北京时间 $today 是否已有成功的评分任务..."
+        runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/auto_score.yml/runs?branch=main&status=success&per_page=100")
+        if jq -e --arg day "$today" '
+          any(.workflow_runs[];
+            (.run_started_at != null) and
+            ((.run_started_at | fromdateiso8601 | . + 28800 | strftime("%Y-%m-%d")) == $day)
+          )' <<< "$runs" >/dev/null; then
+          echo "should_run=false" >> "$GITHUB_OUTPUT"
+          echo "北京时间 $today 已有成功评分，跳过本次，避免重复执行。"
+        else
+          echo "should_run=true" >> "$GITHUB_OUTPUT"
+          echo "北京时间 $today 尚无成功评分，继续执行。"
+        fi
+
     - name: Run scoring script
+      if: steps.daily_guard.outputs.should_run != 'false'
       shell: bash
       env:
         MUSIC_U: ${{ secrets.MUSIC_U }}
