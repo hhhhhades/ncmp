@@ -183,7 +183,13 @@ ncmp(NetEase Cloud Music Partner/网易云音乐合伙人)
 3. 启用 GitHub Actions：
    - 进入仓库的 Actions 页面
    - 点击 "I understand my workflows, go ahead and enable them"
-   - Actions 将会按照预设时间自动运行（默认北京时间1点）
+   - 原生定时任务在北京时间01:01开始调度，计划在01:00–03:00间随机评分；GitHub 可能延迟或漏触发
+
+### 独立备用定时调度（建议开启）
+
+GitHub Actions 的 `schedule` 可能延迟或漏触发。本仓库新增 **Cloudflare Workers 备用调度**，在北京时间 02:45 和 04:15 检查当天是否已成功评分，必要时触发补执行，并通过工作流内的每日去重逻辑避免重复评分。
+
+请按 [备用调度部署说明](backup-scheduler/README.md) 配置 Cloudflare Worker 和专用 GitHub Token。**仅提交仓库文件不会自动启用 Cloudflare 备用调度**，需自行完成外部部署。
 
 ## 注意事项
 
