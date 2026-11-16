@@ -25,12 +25,3 @@ wheels/
 # IDE
 .idea/
 .vscode/
-
-# Cloudflare credentials and local tooling
-.dev.vars
-.dev.vars.*
-.env
-.env.*
-.wrangler/
-node_modules/
-ncmp-score-result.json

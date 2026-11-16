@@ -6,7 +6,6 @@ import re
 import string
 import time
 from typing import Tuple
-from datetime import datetime, timedelta, timezone
 
 import requests
 from Crypto.Cipher import AES
@@ -15,31 +14,21 @@ from ..utils.config import Config
 from ..utils.logger import Logger
 
 
-def beijing_date():
-    return datetime.now(timezone(timedelta(hours=8))).date().isoformat()
-
-
-def ensure_score_date(score_date):
-    if beijing_date() != score_date:
-        raise RuntimeError("北京时间日期已改变，停止本次任务，不能跨日继续评分")
-
-
 class Signer:
-    def __init__(self, session: requests.Session, task_id: str, logger: Logger, config: Config, score_date=None):
+    def __init__(self, session: requests.Session, task_id: str, logger: Logger, config: Config):
         self.session = session
         self.task_id = task_id
         self.logger = logger
         self.config = config
-        self.score_date = score_date or beijing_date()
         self.sign_url = "https://interface.music.163.com/weapi/music/partner/work/evaluate"
-
+        
         # 加密相关常量
         self.random_str = self._generate_random_string(16)
         self.pub_key = "010001"
         self.modulus = "00e0b509f6259df8642dbc35662901477df22677ec152b5ff68ace615bb7b725152b3ab17a876aea8a5aa76d2e417629ec4ee341f56135fccf695280104e0312ecbda92557c93870114af6c9d05c4f7f0c3685b7a46bee255932575cce10b424d813cfe4875d3e82047b97ddef52741d546b8e289dc6935b3ece0462db0a22b8e7"
         self.iv = "0102030405060708"
         self.aes_key = "0CoJUm6Qyw8W8jud"
-
+        
         self.name_pattern = re.compile('.*[a-zA-Z].*')
 
     def _generate_random_string(self, length: int) -> str:
@@ -76,10 +65,10 @@ class Signer:
         """根据作品信息获取评分和标签"""
         # 获取评分策略，默认为4（3-4分）
         score_strategy = int(self.config.get("score", 3))
-
+        
         # 检查名称中是否包含英文
         has_english = bool(self.name_pattern.match(work["name"] + work["authorName"]))
-
+        
         # 根据策略和名称决定评分
         if score_strategy == 1:  # 1-2分策略
             score = "2" if has_english else "1"
@@ -89,60 +78,63 @@ class Signer:
             score = "4" if has_english else "3"
         else:  # 固定4分
             score = "4"
-
+            
         return score, f"{score}-A-1"
 
-    def sign(self, work: dict, is_extra: bool = False) -> bool:
-        """Return True only for an acknowledged score; never retry uncertain POSTs."""
+    def sign(self, work: dict, is_extra: bool = False) -> None:
+        """为作品评分"""
         try:
-            for attempt in range(3):
-                ensure_score_date(self.score_date)
-                delay = self.config.get_wait_time()
-                self.logger.info(f"等待 {delay:.1f} 秒后继续...")
-                time.sleep(delay)
-                ensure_score_date(self.score_date)
-                csrf = str(self.session.cookies["__csrf"])
-                score, tag = self._get_score_and_tag(work)
-                data = {
-                    "taskId": self.task_id,
-                    "workId": work["id"],
-                    "score": score,
-                    "tags": tag,
-                    "customTags": "%5B%5D",
-                    "comment": "",
-                    "syncYunCircle": "true",
-                    "csrf_token": csrf,
-                }
-                if is_extra:
-                    data["extraResource"] = "true"
-                params = {
-                    "params": self._get_params(data),
-                    "encSecKey": self._get_enc_sec_key(),
-                }
-                ensure_score_date(self.score_date)
-                response = self.session.post(
-                    url=f"{self.sign_url}?csrf_token={csrf}",
-                    data=params,
-                    timeout=(10, 45),
-                ).json()
-                ensure_score_date(self.score_date)
-                if not isinstance(response, dict):
-                    raise RuntimeError("评分响应无效")
-                if response.get("code") == 200:
-                    self.logger.info(f'{work["name"]}「{work["authorName"]}」评分完成：{score}分')
-                    return True
-                message = response.get("message") or response.get("msg") or "未知错误"
-                if response.get("code") == 405 and "资源状态异常" in message:
-                    self.logger.warning(f'歌曲「{work["name"]}」资源状态异常，跳过，不计入成功')
-                    return False
-                if "频繁" in message and attempt < 2:
-                    self.logger.info("服务端拒绝频繁评分，按配置等待后重试")
-                    continue
-                raise RuntimeError(f"评分未完成（响应码: {response.get('code')}）")
-            return False
-        except requests.RequestException as error:
-            self.logger.error(f"评分请求未确认（{type(error).__name__}），不自动重发")
-            raise RuntimeError("评分请求未确认，需重新读取服务端状态") from None
-        except Exception as error:
-            self.logger.error(f'歌曲「{work["name"]}」评分异常：{error}')
-            raise RuntimeError(f"评分过程出错: {error}") from None
+            # 使用配置的等待时间
+            delay = self.config.get_wait_time()
+            self.logger.info(f"等待 {delay:.1f} 秒后继续...")
+            time.sleep(delay)
+
+            csrf = str(self.session.cookies["__csrf"])
+            score, tag = self._get_score_and_tag(work)
+            
+            data = {
+                "taskId": self.task_id,
+                "workId": work['id'],
+                "score": score,
+                "tags": tag,
+                "customTags": "%5B%5D",
+                "comment": "",
+                "syncYunCircle": "true",
+                "csrf_token": csrf
+            }
+            
+            # 额外任务需要添加标记
+            if is_extra:
+                data["extraResource"] = "true"
+            
+            params = {
+                "params": self._get_params(data),
+                "encSecKey": self._get_enc_sec_key()
+            }
+            
+            self.logger.debug(f"评分请求数据: {data}")
+            
+            response = self.session.post(
+                url=f'{self.sign_url}?csrf_token={csrf}',
+                data=params
+            ).json()
+            
+            self.logger.debug(f"评分响应数据: {response}")
+            
+            if response["code"] == 200:
+                self.logger.info(f'{work["name"]}「{work["authorName"]}」评分完成：{score}分')
+            else:
+                error_msg = response.get('message') or response.get('msg', '未知错误')
+                if "频繁" in error_msg:
+                    retry_delay = self.config.get_wait_time()
+                    self.logger.info(f"遇到频率限制，等待 {retry_delay:.1f} 秒后重试...")
+                    time.sleep(retry_delay)
+                    self.sign(work, is_extra)
+                elif response["code"] == 405 and "资源状态异常" in error_msg:
+                    self.logger.warning(f'歌曲「{work["name"]}」资源状态异常，跳过')
+                else:
+                    raise RuntimeError(f"评分失败: {error_msg} (响应码: {response.get('code')})")
+                
+        except Exception as e:
+            self.logger.error(f'歌曲「{work["name"]}」评分异常：{str(e)}')
+            raise RuntimeError(f"评分过程出错: {str(e)}") 
