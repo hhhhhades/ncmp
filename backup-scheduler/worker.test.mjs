@@ -204,9 +204,21 @@ test("scheduled callbacks use Cloudflare scheduledTime rather than callback star
   t.mock.method(globalThis, "fetch", async () => calls.push("unexpected"));
   t.mock.method(console, "log", () => {});
   let pending;
-  await worker.scheduled({ scheduledTime: NOW }, ENV, { waitUntil: (promise) => { pending = promise; } });
+  await worker.scheduled({ cron: "45 18 * * *", scheduledTime: NOW }, ENV, { waitUntil: (promise) => { pending = promise; } });
   assert.equal((await pending).status, "expired_cron");
   assert.equal(calls.length, 0);
+});
+
+test("removed or unconfigured Cron triggers can never request a real score", async (t) => {
+  t.mock.method(console, "log", () => {});
+  let requests = 0;
+  t.mock.method(globalThis, "fetch", async () => { requests++; });
+  for (const cron of ["* * * * *", undefined, "0 0 * * *"]) {
+    let waited = false;
+    await worker.scheduled({ cron, scheduledTime: NOW }, ENV, { waitUntil: () => { waited = true; } });
+    assert.equal(waited, false);
+  }
+  assert.equal(requests, 0);
 });
 
 test("verify rejects missing/wrong Authorization and all query credentials", async (t) => {

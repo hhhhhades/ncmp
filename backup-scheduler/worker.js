@@ -177,6 +177,12 @@ async function authorized(request, secret) {
 
 export default {
   async scheduled(event, env, ctx) {
+    // Removed/temporary triggers can continue propagating after a deployment.
+    // Only the two production schedules may request a real score.
+    if (!["45 18 * * *", "15 20 * * *"].includes(event.cron)) {
+      console.log(JSON.stringify({ status: "ignored_unconfigured_cron" }));
+      return;
+    }
     ctx.waitUntil(runBackup(env, { scheduledTime: event.scheduledTime }));
   },
   async fetch(request, env) {
